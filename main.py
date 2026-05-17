@@ -9,6 +9,15 @@ from email.mime.base import MIMEBase
 from email import encoders
 import base64
 import os
+import socket  
+
+_original_getaddrinfo = socket.getaddrinfo
+
+def _forced_ipv4_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    # Override family to standard IPv4 addresses only
+    return _original_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+
+socket.getaddrinfo = _forced_ipv4_getaddrinfo
 
 app = FastAPI()
 
@@ -16,7 +25,7 @@ app = FastAPI()
 # Replace the placeholder URL with your exact Vercel deployment URL
 origins = [
     "http://localhost:3000",
-    "https://sujal-os-frontend.vercel.app/", 
+    "https://sujal-os-frontend.vercel.app", 
 ]
 
 app.add_middleware(
