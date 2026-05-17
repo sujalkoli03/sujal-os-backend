@@ -1,23 +1,10 @@
-import socket
-import sys
-
-# MUST RUN BEFORE ANYTHING ELSE
-_original_getaddrinfo = socket.getaddrinfo
-def _forced_ipv4_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
-    return _original_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
-socket.getaddrinfo = _forced_ipv4_getaddrinfo
-
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from email.mime.base import MIMEBase
-from email import encoders
 import base64
 import os
+import httpx
 
 app = FastAPI()
 
@@ -36,7 +23,7 @@ app.add_middleware(
 
 class EmailRequest(BaseModel):
     sender_email: str
-    app_password: str
+    app_password: str  # We will use this field to pass your Resend API Key (re_...) from the frontend
     receiver_email: str
     receiver_name: str
     subject: str
@@ -51,81 +38,74 @@ async def send_email(request: EmailRequest):
     default_filename = "Sujal_Koli_Latest_Resume.pdf"
     default_resume_path = os.path.join(current_dir, default_filename)
 
-    try:
-        # 1. Setup Email Structural Base
-        message = MIMEMultipart()
-        message["From"] = request.sender_email
-        message["To"] = request.receiver_email
-        message["Subject"] = request.subject
-        
-        final_body = request.body.replace("{{name}}", request.receiver_name or "Hiring Manager")
-        message.attach(MIMEText(final_body, "plain"))
+    # Prepare list for attachments
+    attachments = []
 
-        # 2. Dynamic Attachment Routing Logic Matrix
+    try:
+        final_body = request.body.replace("{{name}}", request.receiver_name or "Hiring Manager")
+
+        # 1. Process Attachments based on Matrix Routing
         if request.resume_status == "default":
-            print(f"DEBUG: Mapping Default Attachment Route: {default_resume_path}")
             if not os.path.exists(default_resume_path):
                 raise HTTPException(
                     status_code=404, 
                     detail=f"Base Document Profile Missing: '{default_filename}' not found on server filesystem."
                 )
-            
             with open(default_resume_path, "rb") as attachment:
-                part = MIMEBase("application", "octet-stream")
-                part.set_payload(attachment.read())
-                encoders.encode_base64(part)
-                part.add_header("Content-Disposition", f"attachment; filename={default_filename}")
-                message.attach(part)
+                encoded_content = base64.b64encode(attachment.read()).decode("utf-8")
+                attachments.append({
+                    "content": encoded_content,
+                    "filename": default_filename
+                })
 
         elif request.resume_status == "custom":
-            print("DEBUG: Processing incoming custom base64 file data buffer...")
             if not request.custom_resume_data:
                 raise HTTPException(
                     status_code=400, 
                     detail="Data Corruption: Custom attachment requested but content data stream parameter is null."
                 )
+            attachments.append({
+                "content": request.custom_resume_data,
+                "filename": request.custom_resume_name or "Uploaded_Resume.pdf"
+            })
+
+        # 2. Build Resend API Request Payload
+        # Resend Free Tier uses onboarding@resend.dev unless you verify a domain
+        from_email = "onboarding@resend.dev" if "re_" in request.app_password else request.sender_email
+
+        payload = {
+            "from": f"Sujal Koli <{from_email}>",
+            "to": [request.receiver_email],
+            "subject": request.subject,
+            "text": final_body,
+        }
+
+        if attachments:
+            payload["attachments"] = attachments
+
+        # 3. Deliver via HTTP POST (Bypasses all Render network bans!)
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                "https://api.resend.com/emails",
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {request.app_password}",
+                    "Content-Type": "application/json"
+                },
+                timeout=15.0
+            )
             
-            try:
-                raw_pdf_bytes = base64.b64decode(request.custom_resume_data)
-            except Exception:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Stream Error: Content data field failed to parse back into base64 binary formatting."
-                )
-
-            attachment_name = request.custom_resume_name or "Uploaded_Resume.pdf"
-            part = MIMEBase("application", "octet-stream")
-            part.set_payload(raw_pdf_bytes)
-            encoders.encode_base64(part)
-            part.add_header("Content-Disposition", f"attachment; filename={attachment_name}")
-            message.attach(part)
-
-        elif request.resume_status == "none":
-            print("DEBUG: Operating in raw text pipeline execution mode. No document attached.")
-
-        else:
+        if response.status_code not in [200, 201]:
+            error_data = response.json()
             raise HTTPException(
-                status_code=400, 
-                detail="Routing Error: Incompatible resume status type parameter submitted."
+                status_code=response.status_code, 
+                detail=error_data.get("message", "Failed to send email via HTTP gateway.")
             )
 
-        # 3. SMTP Gateway Core Connection Execution
-        print(f"DEBUG: Connecting to SMTP server matrix for {request.sender_email}...")
-        
-        # FIXED: Swapped out standard SMTP for SMTP_SSL to match port 465 requirements
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15) as server:
-            server.login(request.sender_email, request.app_password)
-            server.send_message(message)
-            
-        print("DEBUG: Email payload transaction successfully completed!")
         return {"status": "success", "message": f"Mission accomplished. Email successfully sent to {request.receiver_email}"}
 
     except HTTPException as http_ex:
         raise http_ex
-    except smtplib.SMTPAuthenticationError:
-        raise HTTPException(status_code=401, detail="Authentication failed. Check your 16-digit App Password.")
-    except smtplib.SMTPConnectError:
-        raise HTTPException(status_code=503, detail="SMTP Gateway Connection Timeout. Google mail servers rejected the connection.")
     except Exception as e:
         print(f"ERROR: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
