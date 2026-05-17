@@ -1,3 +1,12 @@
+import socket
+import sys
+
+# MUST RUN BEFORE ANYTHING ELSE
+_original_getaddrinfo = socket.getaddrinfo
+def _forced_ipv4_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    return _original_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+socket.getaddrinfo = _forced_ipv4_getaddrinfo
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -9,20 +18,9 @@ from email.mime.base import MIMEBase
 from email import encoders
 import base64
 import os
-import socket  
-
-_original_getaddrinfo = socket.getaddrinfo
-
-def _forced_ipv4_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
-    # Override family to standard IPv4 addresses only
-    return _original_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
-
-socket.getaddrinfo = _forced_ipv4_getaddrinfo
 
 app = FastAPI()
 
-# FIXED: Explicitly allow your live Vercel frontend domain alongside localhost
-# Replace the placeholder URL with your exact Vercel deployment URL
 origins = [
     "http://localhost:3000",
     "https://sujal-os-frontend.vercel.app", 
@@ -49,7 +47,6 @@ class EmailRequest(BaseModel):
 
 @app.post("/send-email")
 async def send_email(request: EmailRequest):
-    # FIXED: Cleaned up relative path handling for hosting environments like Render
     current_dir = os.path.dirname(os.path.abspath(__file__))
     default_filename = "Sujal_Koli_Latest_Resume.pdf"
     default_resume_path = os.path.join(current_dir, default_filename)
@@ -115,10 +112,8 @@ async def send_email(request: EmailRequest):
         # 3. SMTP Gateway Core Connection Execution
         print(f"DEBUG: Connecting to SMTP server matrix for {request.sender_email}...")
         
-        # FIXED: Added an explicit 15-second timeout parameter. 
-        # Without this, if Google blocks Render's IP, the server hangs forever until Render kills it with a 500.
-        with smtplib.SMTP("smtp.gmail.com", 587, timeout=15) as server:
-            server.starttls()
+        # FIXED: Swapped out standard SMTP for SMTP_SSL to match port 465 requirements
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15) as server:
             server.login(request.sender_email, request.app_password)
             server.send_message(message)
             
@@ -137,6 +132,5 @@ async def send_email(request: EmailRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    # Render manages the port dynamically via an environment variable; fallback to 8000 locally
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
