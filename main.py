@@ -16,7 +16,7 @@ app = FastAPI()
 # Replace the placeholder URL with your exact Vercel deployment URL
 origins = [
     "http://localhost:3000",
-    "https://sujal-os-frontend.vercel.app", 
+    "https://sujal-os-frontend.vercel.app/", 
 ]
 
 app.add_middleware(
