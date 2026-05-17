@@ -4,7 +4,11 @@ from pydantic import BaseModel
 from typing import Optional
 import base64
 import os
-import httpx
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
 
 app = FastAPI()
 
@@ -23,7 +27,7 @@ app.add_middleware(
 
 class EmailRequest(BaseModel):
     sender_email: str
-    app_password: str  # We will use this field to pass your Resend API Key (re_...) from the frontend
+    app_password: str  # This will now correctly take your Gmail App Password
     receiver_email: str
     receiver_name: str
     subject: str
@@ -38,13 +42,17 @@ async def send_email(request: EmailRequest):
     default_filename = "Sujal_Koli_Latest_Resume.pdf"
     default_resume_path = os.path.join(current_dir, default_filename)
 
-    # Prepare list for attachments
-    attachments = []
-
     try:
         final_body = request.body.replace("{{name}}", request.receiver_name or "Hiring Manager")
 
-        # 1. Process Attachments based on Matrix Routing
+        # Create MIME Message container
+        msg = MIMEMultipart()
+        msg['From'] = f"Sujal Koli <{request.sender_email}>"
+        msg['To'] = request.receiver_email
+        msg['Subject'] = request.subject
+        msg.attach(MIMEText(final_body, 'plain'))
+
+        # 1. Process Attachments
         if request.resume_status == "default":
             if not os.path.exists(default_resume_path):
                 raise HTTPException(
@@ -52,11 +60,11 @@ async def send_email(request: EmailRequest):
                     detail=f"Base Document Profile Missing: '{default_filename}' not found on server filesystem."
                 )
             with open(default_resume_path, "rb") as attachment:
-                encoded_content = base64.b64encode(attachment.read()).decode("utf-8")
-                attachments.append({
-                    "content": encoded_content,
-                    "filename": default_filename
-                })
+                part = MIMEBase("application", "octet-stream")
+                part.set_payload(attachment.read())
+                encoders.encode_base64(part)
+                part.add_header("Content-Disposition", f"attachment; filename={default_filename}")
+                msg.attach(part)
 
         elif request.resume_status == "custom":
             if not request.custom_resume_data:
@@ -64,48 +72,27 @@ async def send_email(request: EmailRequest):
                     status_code=400, 
                     detail="Data Corruption: Custom attachment requested but content data stream parameter is null."
                 )
-            attachments.append({
-                "content": request.custom_resume_data,
-                "filename": request.custom_resume_name or "Uploaded_Resume.pdf"
-            })
+            # Decode the base64 string provided from the client side
+            file_data = base64.b64decode(request.custom_resume_data)
+            part = MIMEBase("application", "octet-stream")
+            part.set_payload(file_data)
+            encoders.encode_base64(part)
+            filename = request.custom_resume_name or "Uploaded_Resume.pdf"
+            part.add_header("Content-Disposition", f"attachment; filename={filename}")
+            msg.attach(part)
 
-        # 2. Build Resend API Request Payload
-        # Resend Free Tier uses onboarding@resend.dev unless you verify a domain
-        from_email = "onboarding@resend.dev" if "re_" in request.app_password else request.sender_email
-
-        payload = {
-            "from": f"Sujal Koli <{from_email}>",
-            "to": [request.receiver_email],
-            "subject": request.subject,
-            "text": final_body,
-        }
-
-        if attachments:
-            payload["attachments"] = attachments
-
-        # 3. Deliver via HTTP POST (Bypasses all Render network bans!)
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                "https://api.resend.com/emails",
-                json=payload,
-                headers={
-                    "Authorization": f"Bearer {request.app_password}",
-                    "Content-Type": "application/json"
-                },
-                timeout=15.0
-            )
-            
-        if response.status_code not in [200, 201]:
-            error_data = response.json()
-            raise HTTPException(
-                status_code=response.status_code, 
-                detail=error_data.get("message", "Failed to send email via HTTP gateway.")
-            )
+        # 2. Deliver via SMTP (Using Gmail servers)
+        with smtplib.SMTP("smtp.gmail.com", 587) as server:
+            server.starttls()  # Upgrade connection to secure
+            server.login(request.sender_email, request.app_password)
+            server.sendmail(request.sender_email, request.receiver_email, msg.as_string())
 
         return {"status": "success", "message": f"Mission accomplished. Email successfully sent to {request.receiver_email}"}
 
     except HTTPException as http_ex:
         raise http_ex
+    except smtplib.SMTPAuthenticationError:
+        raise HTTPException(status_code=401, detail="Gmail Authentication failed. Check your sender email or App Password.")
     except Exception as e:
         print(f"ERROR: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
